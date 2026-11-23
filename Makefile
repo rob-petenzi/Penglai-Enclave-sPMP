@@ -1,189 +1,94 @@
-# The main Makefile for Penglai-enclave
-# This repo will compose riscv-qemu, linux, penglai's monitor, 
-# 	enclave driver/SDK and demo apps into a runnable one.
-# The Makefile is modified from SiFive's freedom-u-sdk.
-# 	-- Dong Du
+BUILDROOT_DIR ?= $(CURDIR)/../keystone/buildroot
+BUILDROOT_REV := c92cc8796ed951f0604e9272677a9cdfcd93680f
+WORK_DIR ?= $(CURDIR)/work
+OUT_DIR ?= $(WORK_DIR)/buildroot
+OVERLAY_DIR ?= $(WORK_DIR)/overlay
+SDK_WORK ?= $(WORK_DIR)/sdk
+DRV_WORK ?= $(WORK_DIR)/penglai-enclave-driver
+QEMU_DIR ?= $(WORK_DIR)/qemu
+QEMU_SRC := $(CURDIR)/riscv-qemu
+QEMU_BIN := $(QEMU_DIR)/riscv64-softmmu/qemu-system-riscv64
+LINUX_SRC := $(CURDIR)/linux
+OPENSBI_SRC := $(CURDIR)/opensbi
+SDK_SRC := $(CURDIR)/sdk
+DRV_SRC := $(CURDIR)/penglai-enclave-driver
+LINUX_DIR := $(OUT_DIR)/build/linux-custom
+TARGET_CROSS := $(OUT_DIR)/host/bin/riscv64-buildroot-linux-gnu-
+TARGET_CC := $(TARGET_CROSS)gcc
+TARGET_AR := $(TARGET_CROSS)ar
+EAPP_CFLAGS = -nostdinc -march=rv64imac -mabi=lp64 \
+	-isystem $$(riscv64-unknown-elf-gcc -print-file-name=include) \
+	-I$(SDK_WORK)/musl/arch/riscv64 -I$(SDK_WORK)/musl/arch/generic \
+	-I$(SDK_WORK)/musl/obj/include -I$(SDK_WORK)/musl/include \
+	-I$(SDK_WORK)/lib/app/include -Wall -g
+JOBS ?= $(shell nproc)
+export FORCE_UNSAFE_CONFIGURE=1
 
+.PHONY: all build config sdk qemu-build run-qemu
 
-# RISCV must set to point to a directory that contains
-# a toolchain install tree that was built via other means.
-ifndef RISCV
-$(error RISCV is not set, no riscv toolchain for build)
-endif
-PATH := $(RISCV)/bin:$(PATH)
-ISA ?= rv64imafdc
-ABI ?= lp64d
+all: build
 
-srcdir := $(dir $(realpath $(lastword $(MAKEFILE_LIST))))
-srcdir := $(srcdir:/=)
-confdir := $(srcdir)/conf
-wrkdir := $(CURDIR)/work
+$(WORK_DIR)/local.mk: Makefile
+	mkdir -p "$(WORK_DIR)"
+	printf 'LINUX_OVERRIDE_SRCDIR = %s\nOPENSBI_OVERRIDE_SRCDIR = %s\n' "$(LINUX_SRC)" "$(OPENSBI_SRC)" > "$@"
 
-copy_dir := $(CURDIR)/copy-files
-buildroot_srcdir := $(srcdir)/buildroot
-buildroot_initramfs_wrkdir := $(wrkdir)/buildroot_initramfs
-buildroot_initramfs_tar := $(buildroot_initramfs_wrkdir)/images/rootfs.tar
-buildroot_initramfs_config := $(confdir)/buildroot_initramfs_config
-buildroot_initramfs_sysroot_stamp := $(wrkdir)/.buildroot_initramfs_sysroot
-buildroot_initramfs_sysroot := $(wrkdir)/buildroot_initramfs_sysroot
-buildroot_rootfs_wrkdir := $(wrkdir)/buildroot_rootfs
-buildroot_rootfs_ext := $(buildroot_rootfs_wrkdir)/images/rootfs.ext4
-buildroot_rootfs_config := $(confdir)/buildroot_rootfs_config
+$(OUT_DIR)/.config: $(CURDIR)/configs/spmp_defconfig $(CURDIR)/configs/linux_defconfig $(WORK_DIR)/local.mk
+	@test "$$(git -c safe.directory="$(abspath $(BUILDROOT_DIR))" -C "$(BUILDROOT_DIR)" rev-parse HEAD)" = "$(BUILDROOT_REV)" || { echo "Buildroot must be initialized at $(BUILDROOT_REV)" >&2; exit 1; }
+	@git -c safe.directory="$(abspath $(BUILDROOT_DIR))" -C "$(BUILDROOT_DIR)" diff --quiet HEAD -- . || { echo "Pinned Buildroot source has tracked local changes." >&2; exit 1; }
+	mkdir -p "$(OVERLAY_DIR)"
+	$(MAKE) -C "$(BUILDROOT_DIR)" O="$(OUT_DIR)" BR2_DEFCONFIG="$(CURDIR)/configs/spmp_defconfig" defconfig
+	"$(BUILDROOT_DIR)/utils/config" --file "$(OUT_DIR)/.config" \
+		--set-str BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE "$(CURDIR)/configs/linux_defconfig" \
+		--set-str BR2_PACKAGE_OVERRIDE_FILE "$(WORK_DIR)/local.mk" \
+		--set-str BR2_ROOTFS_OVERLAY "$(OVERLAY_DIR)"
+	$(MAKE) -C "$(BUILDROOT_DIR)" O="$(OUT_DIR)" olddefconfig
 
-linux_srcdir := $(srcdir)/linux
-linux_wrkdir := $(wrkdir)/linux
-linux_defconfig := $(confdir)/linux_defconfig
+config: $(OUT_DIR)/.config
 
-vmlinux := $(linux_wrkdir)/vmlinux
-vmlinux_stripped := $(linux_wrkdir)/vmlinux-stripped
+$(WORK_DIR)/.base.stamp: $(OUT_DIR)/.config
+	$(MAKE) -C "$(BUILDROOT_DIR)" O="$(OUT_DIR)" -j$(JOBS) toolchain linux opensbi
+	touch "$@"
 
-pk_srcdir := $(srcdir)/monitor
-pk_wrkdir := $(wrkdir)/monitor
-bbl := $(pk_wrkdir)/bbl
-bin := $(wrkdir)/bbl.bin
-hex := $(wrkdir)/bbl.hex
+$(WORK_DIR)/.sdk.stamp: $(WORK_DIR)/.base.stamp
+	mkdir -p "$(SDK_WORK)" "$(DRV_WORK)"
+	rsync -a --delete --exclude=.git "$(SDK_SRC)/" "$(SDK_WORK)/"
+	rsync -a --delete --exclude=.git "$(DRV_SRC)/" "$(DRV_WORK)/"
+	find "$(SDK_WORK)" "$(DRV_WORK)" -type f \( -name '*.o' -o -name '*.a' -o -name '*.ko' \) -delete
+	PATH="$(OUT_DIR)/host/bin:$$PATH" $(MAKE) -C "$(LINUX_DIR)" ARCH=riscv CROSS_COMPILE="$(TARGET_CROSS)" M="$(DRV_WORK)" -j$(JOBS) modules
+	cd "$(SDK_WORK)/musl" && CC=riscv64-unknown-elf-gcc CFLAGS="-march=rv64imac -mabi=lp64" ./configure --disable-shared --target=riscv64
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/musl" -j$(JOBS) CC=riscv64-unknown-elf-gcc CROSS_COMPILE=riscv64-unknown-elf- AR=riscv64-unknown-elf-ar RANLIB=riscv64-unknown-elf-ranlib CFLAGS="-march=rv64imac -mabi=lp64"
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/lib/app" -j$(JOBS) CC=riscv64-unknown-elf-gcc AR=riscv64-unknown-elf-ar GCC=riscv64-unknown-elf-gcc CFLAGS="$(EAPP_CFLAGS)"
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/lib/host" -j$(JOBS) GCC="$(TARGET_CC)" ARC="$(TARGET_AR)" GCCFLAGS="-Wall -Werror -shared -fPIC -I include/"
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/demo/prime" -j$(JOBS) CC=riscv64-unknown-elf-gcc LINK=riscv64-unknown-elf-ld AR=riscv64-unknown-elf-ar CFLAGS="$(EAPP_CFLAGS)"
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/demo/host" -j$(JOBS) CC="$(TARGET_CC)"
+	KVER="$$(PATH="$(OUT_DIR)/host/bin:$$PATH" $(MAKE) -s -C "$(LINUX_DIR)" ARCH=riscv CROSS_COMPILE="$(TARGET_CROSS)" kernelrelease)"; \
+	install -D -m 0644 "$(DRV_WORK)/penglai.ko" "$(OVERLAY_DIR)/lib/modules/$$KVER/extra/penglai.ko"; \
+	install -D -m 0644 "$(DRV_WORK)/penglai.ko" "$(OUT_DIR)/target/lib/modules/$$KVER/extra/penglai.ko"
+	install -D -m 0755 "$(SDK_WORK)/demo/host/host" "$(OVERLAY_DIR)/usr/share/penglai/spmp/host"
+	install -D -m 0644 "$(SDK_WORK)/demo/prime/prime" "$(OVERLAY_DIR)/usr/share/penglai/spmp/prime"
+	touch "$@"
 
-target_platform := spmp
+sdk: $(WORK_DIR)/.sdk.stamp
 
-qemu_srcdir := $(srcdir)/riscv-qemu
-qemu_wrkdir := $(wrkdir)/riscv-qemu
-qemu := $(qemu_wrkdir)/prefix/bin/qemu-system-riscv64
+$(OUT_DIR)/images/rootfs.ext2: $(WORK_DIR)/.sdk.stamp
+	$(MAKE) -C "$(BUILDROOT_DIR)" O="$(OUT_DIR)" -j$(JOBS)
 
-rootfs := $(wrkdir)/rootfs.bin
+$(QEMU_DIR)/config-host.mak:
+	mkdir -p "$(QEMU_DIR)"
+	cd "$(QEMU_DIR)" && "$(QEMU_SRC)/configure" --target-list=riscv64-softmmu \
+		--disable-werror --disable-docs --disable-capstone --disable-git-update \
+		--disable-gtk --disable-sdl
 
-target := riscv64-unknown-linux-gnu
+$(QEMU_BIN): $(QEMU_DIR)/config-host.mak
+	$(MAKE) -C "$(QEMU_DIR)" -j$(JOBS) riscv64-softmmu/all
 
-.PHONY: all
-all: $(hex) $(qemu) $(bbl) $(rootfs)
-	@echo
-	@echo "This image for Penglai has been generated for an ISA of $(ISA) and an ABI of $(ABI)"
-	@echo "Type make qemu -j8 to run the image"
-	@echo
+qemu-build: $(QEMU_BIN)
 
-$(buildroot_initramfs_wrkdir)/.config: $(buildroot_srcdir)
-	#rm -rf $(dir $@)
-	mkdir -p $(dir $@)
-	cp $(buildroot_initramfs_config) $@
-	$(MAKE) -C $< RISCV=$(RISCV) PATH=$(PATH) O=$(buildroot_initramfs_wrkdir) olddefconfig CROSS_COMPILE=riscv64-unknown-linux-gnu-
+build: $(OUT_DIR)/images/rootfs.ext2 $(QEMU_BIN)
 
-$(buildroot_initramfs_tar): $(buildroot_srcdir) $(buildroot_initramfs_wrkdir)/.config $(buildroot_initramfs_config) force
-	$(MAKE) -C $< RISCV=$(RISCV) PATH=$(PATH) O=$(buildroot_initramfs_wrkdir)
-
-.PHONY: buildroot_initramfs-menuconfig
-buildroot_initramfs-menuconfig: $(buildroot_initramfs_wrkdir)/.config $(buildroot_srcdir)
-	$(MAKE) -C $(dir $<) O=$(buildroot_initramfs_wrkdir) menuconfig
-	$(MAKE) -C $(dir $<) O=$(buildroot_initramfs_wrkdir) savedefconfig
-	cp $(dir $<)/defconfig conf/buildroot_initramfs_config
-
-$(buildroot_rootfs_wrkdir)/.config: $(buildroot_srcdir)
-	#rm -rf $(dir $@)
-	mkdir -p $(dir $@)
-	cp $(buildroot_rootfs_config) $@
-	$(MAKE) -C $< RISCV=$(RISCV) PATH=$(PATH) O=$(buildroot_rootfs_wrkdir) olddefconfig
-
-$(buildroot_rootfs_ext): $(buildroot_srcdir) $(buildroot_rootfs_wrkdir)/.config $(buildroot_rootfs_config) $(copy_dir)
-	$(MAKE) -C $< RISCV=$(RISCV) PATH=$(PATH) O=$(buildroot_rootfs_wrkdir)
-
-$(buildroot_initramfs_sysroot_stamp): $(buildroot_initramfs_tar)
-	mkdir -p $(buildroot_initramfs_sysroot)
-	tar -xpf $< -C $(buildroot_initramfs_sysroot) --exclude ./dev --exclude ./usr/share/locale
-	touch $@
-
-$(linux_wrkdir)/.config: $(linux_defconfig) $(linux_srcdir)
-	mkdir -p $(dir $@)
-	cp -p $< $@
-	$(MAKE) -C $(linux_srcdir) O=$(linux_wrkdir) ARCH=riscv olddefconfig
-	echo $(ISA)
-	echo $(filter rv32%,$(ISA))
-ifeq (,$(filter rv%c,$(ISA)))
-	sed 's/^.*CONFIG_RISCV_ISA_C.*$$/CONFIG_RISCV_ISA_C=n/' -i $@
-	$(MAKE) -C $(linux_srcdir) O=$(linux_wrkdir) ARCH=riscv olddefconfig
-endif
-ifeq ($(ISA),$(filter rv32%,$(ISA)))
-	sed 's/^.*CONFIG_ARCH_RV32I.*$$/CONFIG_ARCH_RV32I=y/' -i $@
-	sed 's/^.*CONFIG_ARCH_RV64I.*$$/CONFIG_ARCH_RV64I=n/' -i $@
-	$(MAKE) -C $(linux_srcdir) O=$(linux_wrkdir) ARCH=riscv olddefconfig
-endif
-
-$(vmlinux): $(linux_srcdir) $(linux_wrkdir)/.config $(buildroot_initramfs_sysroot_stamp)
-	$(MAKE) -C $< O=$(linux_wrkdir) \
-		CONFIG_INITRAMFS_SOURCE="$(confdir)/initramfs.txt $(buildroot_initramfs_sysroot)" \
-		CONFIG_INITRAMFS_ROOT_UID=$(shell id -u) \
-		CONFIG_INITRAMFS_ROOT_GID=$(shell id -g) \
-		CROSS_COMPILE=riscv64-unknown-linux-gnu- \
-		ARCH=riscv \
-		vmlinux
-
-$(vmlinux_stripped): $(vmlinux)
-	$(target)-strip -o $@ $<
-
-.PHONY: linux-menuconfig
-linux-menuconfig: $(linux_wrkdir)/.config
-	$(MAKE) -C $(linux_srcdir) O=$(dir $<) ARCH=riscv menuconfig
-	$(MAKE) -C $(linux_srcdir) O=$(dir $<) ARCH=riscv savedefconfig
-	cp $(dir $<)/defconfig conf/linux_defconfig
-
-$(bbl): $(pk_srcdir) $(vmlinux_stripped)
-	rm -rf $(pk_wrkdir)
-	mkdir -p $(pk_wrkdir)
-	cd $(pk_wrkdir) && $</configure \
-		--host=$(target) \
-		--with-payload=$(vmlinux_stripped) \
-		--with-target-platform=$(target_platform) \
-		--enable-logo \
-		--with-logo=$(abspath conf/penglai_logo_zh.txt)
-	CFLAGS="-mabi=$(ABI) -march=$(ISA)" $(MAKE) -C $(pk_wrkdir)
-
-$(bin): $(bbl)
-	$(target)-objcopy -S -O binary --change-addresses -0x80000000 $< $@
-
-$(hex):	$(bin)
-	xxd -c1 -p $< > $@
-
-$(qemu): $(qemu_srcdir)
-	rm -rf $(qemu_wrkdir)
-	mkdir -p $(qemu_wrkdir)
-	mkdir -p $(dir $@)
-	cd $(qemu_wrkdir) && $</configure \
-		--prefix=$(dir $(abspath $(dir $@))) \
-		--target-list=riscv64-softmmu
-	$(MAKE) -C $(qemu_wrkdir)
-	$(MAKE) -C $(qemu_wrkdir) install
-	touch -c $@
-
-$(rootfs): $(buildroot_rootfs_ext)
-	cp $< $@
-
-.PHONY: buildroot_initramfs_sysroot vmlinux bbl
-buildroot_initramfs_sysroot: $(buildroot_initramfs_sysroot)
-vmlinux: $(vmlinux)
-bbl: $(bbl)
-
-.PHONY: clean
-clean:
-#	rm -rf -- $(linux_wrkdir)/vmlinux
-	rm -rf -- $(pk_wrkdir) $(linux_wrkdir)/vmlinux
-#	rm -rf -- $(wrkdir) $(linux_wrkdir)/vmlinux
-#	rm -rf -- $(wrkdir)
-#	rm -rf -- $(wrkdir) $(toolchain_dest)
-
-# FIXME: Here we always re-compile sdk using the force target
-.PHONY: force
-sdk := $(srcdir)/sdk/enclave-driver/penglai.ko
-$(sdk): $(vmlinux) force
-	cd $(srcdir)/sdk/enclave-driver && make
-	cd -
-	cd $(srcdir)/sdk && PENGLAI_SDK=$(srcdir)/sdk make
-	cd -
-	# Copy the compiled files to copy-files
-	cp $(srcdir)/sdk/enclave-driver/penglai.ko $(copy_dir)
-	cp $(srcdir)/sdk/demo/host/host $(copy_dir)
-	cp $(srcdir)/sdk/demo/prime/prime $(copy_dir)
-sdk: $(sdk)
-
-.PHONY: qemu
-qemu:
-	sudo $(qemu) -nographic -machine virt -smp 8 -m 4096M -kernel $(bbl) \
-		-drive file=$(rootfs),format=raw,id=hd0 -device virtio-blk-device,drive=hd0 \
-		-netdev user,id=net0 -device virtio-net-device,netdev=net0
-
+run-qemu: build
+	"$(QEMU_BIN)" -nographic -M virt -m "$(or $(MEMORY),2G)" -smp "$(or $(CPUS),1)" \
+		-bios "$(OUT_DIR)/images/fw_jump.bin" -kernel "$(OUT_DIR)/images/Image" \
+		-drive file="$(OUT_DIR)/images/rootfs.ext2",format=raw,id=hd0 -device virtio-blk-device,drive=hd0 \
+		-netdev user,id=net0 -device virtio-net-device,netdev=net0 \
+		-append "root=/dev/vda rw console=ttyS0"

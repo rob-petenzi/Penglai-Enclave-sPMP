@@ -1,8 +1,7 @@
 ##
 ## Author: Dong Du
 ## Description:
-## 	The file now assumes the kernel located in ../openeuler-kernel,
-##	if you would like to use your own one, please change the path
+## 	Build the external module against KDIR (defaults to the legacy kernel path).
 
 obj-m += penglai.o
 penglai-objs := penglai-enclave-driver.o \
@@ -11,8 +10,12 @@ penglai-objs := penglai-enclave-driver.o \
 	penglai-enclave.o \
 	penglai-enclave-ioctl.o 
 
+KDIR ?= ../linux
+ARCH ?= riscv
+CROSS_COMPILE ?=
+
 all:
-	make -C ../openeuler-kernel/ ARCH=riscv M=$(PWD) modules
+	$(MAKE) -C $(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) M=$(CURDIR) modules
 
 clean:
-	make -C ../openeuler-kernel/ ARCH=riscv M=$(PWD) clean
+	$(MAKE) -C $(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) M=$(CURDIR) clean

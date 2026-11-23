@@ -22,6 +22,11 @@
 #include <sbi/sbi_timer.h>
 #include <sbi/sbi_trap.h>
 
+#include <sm/sm.h>
+
+int m_mode_status[MAX_HARTS];
+volatile int print_m_mode = 0;
+
 static void __noreturn sbi_trap_error(const char *msg, int rc,
 				      ulong mcause, ulong mtval, ulong mtval2,
 				      ulong mtinst, struct sbi_trap_regs *regs)
@@ -267,18 +272,29 @@ struct sbi_trap_regs *sbi_trap_handler(struct sbi_trap_regs *regs)
 		mtval2 = csr_read(CSR_MTVAL2);
 		mtinst = csr_read(CSR_MTINST);
 	}
+	int hartid = csr_read(CSR_MHARTID);
+	m_mode_status[hartid] = 1;
 
 	if (mcause & (1UL << (__riscv_xlen - 1))) {
-		if (sbi_hart_has_extension(sbi_scratch_thishart_ptr(),
-					   SBI_HART_EXT_AIA))
+		if ((mcause & ~(1UL << (__riscv_xlen - 1))) == IRQ_M_TIMER &&
+		    check_in_enclave_world() >= 0) {
+			sm_do_timer_irq((uintptr_t *)regs,
+					mcause & ~(1UL << (__riscv_xlen - 1)),
+					regs->mepc);
+			rc = 0;
+		} else if (sbi_hart_has_extension(sbi_scratch_thishart_ptr(),
+						   SBI_HART_EXT_AIA)) {
 			rc = sbi_trap_aia_irq(regs, mcause);
-		else
+		} else {
 			rc = sbi_trap_nonaia_irq(regs, mcause);
+		}
 		if (rc) {
 			msg = "unhandled local interrupt";
 			goto trap_error;
 		}
-		return regs;
+		hartid = csr_read(CSR_MHARTID);
+		m_mode_status[hartid] = 0;
+	return regs;
 	}
 
 	switch (mcause) {
@@ -294,8 +310,18 @@ struct sbi_trap_regs *sbi_trap_handler(struct sbi_trap_regs *regs)
 		rc  = sbi_misaligned_store_handler(mtval, mtval2, mtinst, regs);
 		msg = "misaligned store handler failed";
 		break;
+	case CAUSE_USER_ECALL:
+		//The only case for USER_ECALL is issued by Penglai Enclave now
+		if (check_in_enclave_world() <0) {
+			sbi_printf("[Penglai] Error, user ecall not in enclaves\n");
+			rc = -1;
+			break;
+		} else {// continue to sbi_ecall_handler
+			//sbi_printf("[Penglai] ecall from enclaves\n");
+		}
 	case CAUSE_SUPERVISOR_ECALL:
 	case CAUSE_MACHINE_ECALL:
+		
 		rc  = sbi_ecall_handler(regs);
 		msg = "ecall handler failed";
 		break;
@@ -318,6 +344,8 @@ struct sbi_trap_regs *sbi_trap_handler(struct sbi_trap_regs *regs)
 trap_error:
 	if (rc)
 		sbi_trap_error(msg, rc, mcause, mtval, mtval2, mtinst, regs);
+	hartid = csr_read(CSR_MHARTID);
+	m_mode_status[hartid] = 0;
 	return regs;
 }
 

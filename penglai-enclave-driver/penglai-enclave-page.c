@@ -89,7 +89,7 @@ static inline paddr_t pa2ppn(paddr_t vaddr)
 
 static inline int get_pt_index(vaddr_t vaddr, int level)
 {
-	int index = vaddr >> (VA_BITS - (level + 1)*RISCV_PGLEVEL_BITS);
+	int index = vaddr >> (ENCLAVE_VA_BITS - (level + 1)*RISCV_PGLEVEL_BITS);
 
 	return index & ((1 << RISCV_PGLEVEL_BITS) - 1) ;
 }

@@ -1,11 +1,11 @@
 BUILDROOT_DIR ?= $(CURDIR)/../keystone/buildroot
 BUILDROOT_REV := c92cc8796ed951f0604e9272677a9cdfcd93680f
-WORK_DIR ?= $(CURDIR)/work
-OUT_DIR ?= $(WORK_DIR)/buildroot
-OVERLAY_DIR ?= $(WORK_DIR)/overlay
-SDK_WORK ?= $(WORK_DIR)/sdk
-DRV_WORK ?= $(WORK_DIR)/penglai-enclave-driver
-QEMU_DIR ?= $(WORK_DIR)/qemu
+BUILD_DIR ?= $(CURDIR)/build
+OUT_DIR ?= $(BUILD_DIR)/buildroot
+OVERLAY_DIR ?= $(BUILD_DIR)/overlay
+SDK_WORK ?= $(BUILD_DIR)/sdk
+DRV_WORK ?= $(BUILD_DIR)/penglai-enclave-driver
+QEMU_DIR ?= $(BUILD_DIR)/qemu
 QEMU_SRC := $(CURDIR)/riscv-qemu
 QEMU_BIN := $(QEMU_DIR)/riscv64-softmmu/qemu-system-riscv64
 LINUX_SRC := $(CURDIR)/linux
@@ -28,28 +28,28 @@ export FORCE_UNSAFE_CONFIGURE=1
 
 all: build
 
-$(WORK_DIR)/local.mk: Makefile
-	mkdir -p "$(WORK_DIR)"
+$(BUILD_DIR)/local.mk: Makefile
+	mkdir -p "$(BUILD_DIR)"
 	printf 'LINUX_OVERRIDE_SRCDIR = %s\nOPENSBI_OVERRIDE_SRCDIR = %s\n' "$(LINUX_SRC)" "$(OPENSBI_SRC)" > "$@"
 
-$(OUT_DIR)/.config: $(CURDIR)/configs/spmp_defconfig $(CURDIR)/configs/linux_defconfig $(WORK_DIR)/local.mk
+$(OUT_DIR)/.config: $(CURDIR)/configs/spmp_defconfig $(CURDIR)/configs/linux_defconfig $(BUILD_DIR)/local.mk
 	@test "$$(git -c safe.directory="$(abspath $(BUILDROOT_DIR))" -C "$(BUILDROOT_DIR)" rev-parse HEAD)" = "$(BUILDROOT_REV)" || { echo "Buildroot must be initialized at $(BUILDROOT_REV)" >&2; exit 1; }
 	@git -c safe.directory="$(abspath $(BUILDROOT_DIR))" -C "$(BUILDROOT_DIR)" diff --quiet HEAD -- . || { echo "Pinned Buildroot source has tracked local changes." >&2; exit 1; }
 	mkdir -p "$(OVERLAY_DIR)"
 	$(MAKE) -C "$(BUILDROOT_DIR)" O="$(OUT_DIR)" BR2_DEFCONFIG="$(CURDIR)/configs/spmp_defconfig" defconfig
 	"$(BUILDROOT_DIR)/utils/config" --file "$(OUT_DIR)/.config" \
 		--set-str BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE "$(CURDIR)/configs/linux_defconfig" \
-		--set-str BR2_PACKAGE_OVERRIDE_FILE "$(WORK_DIR)/local.mk" \
+		--set-str BR2_PACKAGE_OVERRIDE_FILE "$(BUILD_DIR)/local.mk" \
 		--set-str BR2_ROOTFS_OVERLAY "$(OVERLAY_DIR)"
 	$(MAKE) -C "$(BUILDROOT_DIR)" O="$(OUT_DIR)" olddefconfig
 
 config: $(OUT_DIR)/.config
 
-$(WORK_DIR)/.base.stamp: $(OUT_DIR)/.config
+$(BUILD_DIR)/.base.stamp: $(OUT_DIR)/.config
 	$(MAKE) -C "$(BUILDROOT_DIR)" O="$(OUT_DIR)" -j$(JOBS) toolchain linux opensbi
 	touch "$@"
 
-$(WORK_DIR)/.sdk.stamp: $(WORK_DIR)/.base.stamp
+$(BUILD_DIR)/.sdk.stamp: $(BUILD_DIR)/.base.stamp
 	mkdir -p "$(SDK_WORK)" "$(DRV_WORK)"
 	rsync -a --delete --exclude=.git "$(SDK_SRC)/" "$(SDK_WORK)/"
 	rsync -a --delete --exclude=.git "$(DRV_SRC)/" "$(DRV_WORK)/"
@@ -68,9 +68,9 @@ $(WORK_DIR)/.sdk.stamp: $(WORK_DIR)/.base.stamp
 	install -D -m 0644 "$(SDK_WORK)/demo/prime/prime" "$(OVERLAY_DIR)/usr/share/penglai/spmp/prime"
 	touch "$@"
 
-sdk: $(WORK_DIR)/.sdk.stamp
+sdk: $(BUILD_DIR)/.sdk.stamp
 
-$(OUT_DIR)/images/rootfs.ext2: $(WORK_DIR)/.sdk.stamp
+$(OUT_DIR)/images/rootfs.ext2: $(BUILD_DIR)/.sdk.stamp
 	$(MAKE) -C "$(BUILDROOT_DIR)" O="$(OUT_DIR)" -j$(JOBS)
 
 $(QEMU_DIR)/config-host.mak:

@@ -886,9 +886,8 @@ uintptr_t exit_enclave(uintptr_t* regs, unsigned long retval)
 	//free enclave's memory
 	//TODO: support multiple memory region
 	sbi_memset((void*)(enclave->paddr), 0, enclave->size);
-	// mm_free((void*)(enclave->paddr), enclave->size);
-	// Optional: used to reclaim secmem immediately upon enclave exit
-	mm_free_clear((void*)(enclave->paddr), enclave->size);
+	/* Return the enclave block to the SM buddy pool so 4 MiB regions are reused instead of leaked. */
+	mm_free((void*)(enclave->paddr), enclave->size);
 	release_big_metadata_lock(__func__);
 
 	//free enclave struct

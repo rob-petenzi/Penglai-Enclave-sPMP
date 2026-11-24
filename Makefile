@@ -15,9 +15,13 @@ DRV_SRC := $(CURDIR)/penglai-enclave-driver
 LINUX_DIR := $(OUT_DIR)/build/linux-custom
 TARGET_CROSS := $(OUT_DIR)/host/bin/riscv64-buildroot-linux-gnu-
 TARGET_CC := $(TARGET_CROSS)gcc
+TARGET_LD := $(TARGET_CROSS)ld
 TARGET_AR := $(TARGET_CROSS)ar
-EAPP_CFLAGS = -nostdinc -march=rv64imac -mabi=lp64 \
-	-isystem $$(riscv64-unknown-elf-gcc -print-file-name=include) \
+TARGET_RANLIB := $(TARGET_CROSS)ranlib
+BEEBS_DIR ?= $(CURDIR)/../beebs
+EAPP_ARCH_FLAGS := -march=rv64imafd -mabi=lp64d
+EAPP_CFLAGS = -nostdinc $(EAPP_ARCH_FLAGS) -mno-relax \
+	-isystem $$($(TARGET_CC) -print-file-name=include) \
 	-I$(SDK_WORK)/musl/arch/riscv64 -I$(SDK_WORK)/musl/arch/generic \
 	-I$(SDK_WORK)/musl/obj/include -I$(SDK_WORK)/musl/include \
 	-I$(SDK_WORK)/lib/app/include -Wall -g
@@ -58,17 +62,25 @@ $(BUILD_DIR)/.sdk.stamp: $(BUILD_DIR)/.base.stamp
 	rsync -a --delete --exclude=.git "$(DRV_SRC)/" "$(DRV_WORK)/"
 	find "$(SDK_WORK)" "$(DRV_WORK)" -type f \( -name '*.o' -o -name '*.a' -o -name '*.ko' \) -delete
 	PATH="$(OUT_DIR)/host/bin:$$PATH" $(MAKE) -C "$(LINUX_DIR)" ARCH=riscv CROSS_COMPILE="$(TARGET_CROSS)" M="$(DRV_WORK)" -j$(JOBS) modules
-	cd "$(SDK_WORK)/musl" && CC=riscv64-unknown-elf-gcc CFLAGS="-march=rv64imac -mabi=lp64" ./configure --disable-shared --target=riscv64
-	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/musl" -j$(JOBS) CC=riscv64-unknown-elf-gcc CROSS_COMPILE=riscv64-unknown-elf- AR=riscv64-unknown-elf-ar RANLIB=riscv64-unknown-elf-ranlib CFLAGS="-march=rv64imac -mabi=lp64"
-	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/lib/app" -j$(JOBS) CC=riscv64-unknown-elf-gcc AR=riscv64-unknown-elf-ar GCC=riscv64-unknown-elf-gcc CFLAGS="$(EAPP_CFLAGS)"
+	cd "$(SDK_WORK)/musl" && CC="$(TARGET_CC)" CFLAGS="$(EAPP_ARCH_FLAGS) -mno-relax" ./configure --disable-shared --target=riscv64
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/musl" -j$(JOBS) CC="$(TARGET_CC)" CROSS_COMPILE="$(TARGET_CROSS)" AR="$(TARGET_AR)" RANLIB="$(TARGET_RANLIB)" CFLAGS="$(EAPP_ARCH_FLAGS) -mno-relax"
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/lib/app" -j$(JOBS) CC="$(TARGET_CC)" AR="$(TARGET_AR)" GCC="$(TARGET_CC)" CFLAGS="$(EAPP_CFLAGS)"
 	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/lib/host" -j$(JOBS) GCC="$(TARGET_CC)" ARC="$(TARGET_AR)" GCCFLAGS="-Wall -Werror -shared -fPIC -I include/"
-	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/demo/prime" -j$(JOBS) CC=riscv64-unknown-elf-gcc LINK=riscv64-unknown-elf-ld AR=riscv64-unknown-elf-ar CFLAGS="$(EAPP_CFLAGS)"
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/demo/prime" -j$(JOBS) CC="$(TARGET_CC)" LINK="$(TARGET_LD)" AR="$(TARGET_AR)" ARCH_FLAGS="$(EAPP_ARCH_FLAGS)" CFLAGS="$(EAPP_CFLAGS)"
 	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/demo/host" -j$(JOBS) CC="$(TARGET_CC)"
+	PENGLAI_SDK="$(SDK_WORK)" $(MAKE) -C "$(SDK_WORK)/demo/beebs" -j$(JOBS) BEEBS_DIR="$(BEEBS_DIR)" CC="$(TARGET_CC)" LINK="$(TARGET_LD)" AR="$(TARGET_AR)" ARCH_FLAGS="$(EAPP_ARCH_FLAGS)" EAPP_CFLAGS="$(EAPP_CFLAGS)"
 	KVER="$$(PATH="$(OUT_DIR)/host/bin:$$PATH" $(MAKE) -s -C "$(LINUX_DIR)" ARCH=riscv CROSS_COMPILE="$(TARGET_CROSS)" kernelrelease)"; \
 	install -D -m 0644 "$(DRV_WORK)/penglai.ko" "$(OVERLAY_DIR)/lib/modules/$$KVER/extra/penglai.ko"; \
 	install -D -m 0644 "$(DRV_WORK)/penglai.ko" "$(OUT_DIR)/target/lib/modules/$$KVER/extra/penglai.ko"
 	install -D -m 0755 "$(SDK_WORK)/demo/host/host" "$(OVERLAY_DIR)/usr/share/penglai/spmp/host"
 	install -D -m 0644 "$(SDK_WORK)/demo/prime/prime" "$(OVERLAY_DIR)/usr/share/penglai/spmp/prime"
+	install -d "$(OVERLAY_DIR)/usr/share/penglai/spmp/beebs"
+	install -m 0755 "$(SDK_WORK)/demo/beebs/beebs-runner" "$(OVERLAY_DIR)/usr/share/penglai/spmp/beebs/beebs-runner"
+	install -m 0755 "$(SDK_WORK)/demo/beebs/run-beebs.sh" "$(OVERLAY_DIR)/usr/share/penglai/spmp/beebs/run-beebs.sh"
+	for b in bubblesort compress dijkstra insertsort nsichneu qsort statemate tarai; do \
+		install -m 0644 "$(SDK_WORK)/demo/beebs/beebs-$$b" "$(OVERLAY_DIR)/usr/share/penglai/spmp/beebs/beebs-$$b"; \
+		install -m 0755 "$(SDK_WORK)/demo/beebs/beebs-$$b-plain" "$(OVERLAY_DIR)/usr/share/penglai/spmp/beebs/beebs-$$b-plain"; \
+	done
 	touch "$@"
 
 sdk: $(BUILD_DIR)/.sdk.stamp

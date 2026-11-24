@@ -72,6 +72,22 @@ int enclave_ioctl_init(void)
 		printk("[Penglai KModule]: sbi call mm_init is failed\n");
 		goto deregister_device;
 	}
+
+	/* Pre-extend with a second 4 MiB region so metadata and a 4 MiB enclave coexist without extending at create time. */
+	addr = __get_free_pages(GFP_HIGHUSER, DEFAULT_SECURE_PAGES_ORDER);
+	if(!addr)
+	{
+		printk("[Penglai KModule]: can not get extra secure pages order 0x%x\n", DEFAULT_SECURE_PAGES_ORDER);
+		ret = -ENOMEM;
+		goto deregister_device;
+	}
+	sbiret = SBI_CALL_2(SBI_SM_MEMORY_EXTEND, __pa(addr), 1 << (DEFAULT_SECURE_PAGES_ORDER + RISCV_PGSHIFT));
+	if(sbiret.error)
+	{
+		printk("[Penglai KModule]: sbi call memory_extend is failed\n");
+		ret = sbiret.value;
+		goto deregister_device;
+	}
 #endif
 	printk("[Penglai KModule] register_chrdev succeeded!\n");
 	return 0;

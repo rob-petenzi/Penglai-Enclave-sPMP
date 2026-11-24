@@ -23,6 +23,9 @@ unsigned int total_enclave_page(int elf_size, int stack_size)
 {
 	unsigned int total_pages;
 	total_pages = PAGE_UP(elf_size) / RISCV_PGSIZE + PAGE_UP(stack_size) / RISCV_PGSIZE + 15;
+	/* Match Keystone's 4 MiB (1024-page, order-10) enclave allocation for fair comparison. */
+	if (total_pages < 1024)
+		total_pages = 1024;
 	return total_pages;
 }
 
@@ -332,6 +335,24 @@ int penglai_enclave_run(struct file *filep, unsigned long args)
 	struct sbiret ret = {0};
 	int retval = 0;
 	int resume_id = 0;
+	void *staged_untrusted = NULL;
+
+	/* Stage user-space untrusted input before acquiring the spinlock (copy_from_user may sleep). */
+	if((void*)untrusted_mem_ptr != NULL && untrusted_mem_size > 0){
+		if(untrusted_mem_size > MAX_UNTRUSTED_MEM_SIZE){
+			printk("KERNEL MODULE: untrusted memory is too big \n");
+			return -EINVAL;
+		}
+		staged_untrusted = kmalloc(untrusted_mem_size, GFP_KERNEL);
+		if (!staged_untrusted)
+			return -ENOMEM;
+		if (copy_from_user(staged_untrusted, (void *)untrusted_mem_ptr, untrusted_mem_size))
+		{
+			kfree(staged_untrusted);
+			printk("KERNEL MODULE: copy_from_user failed \n");
+			return -EFAULT;
+		}
+	}
 
 	dprint("[Penglai Driver@%s] begin get_enclave_by_id\n", __func__);
 	acquire_big_lock(__func__);
@@ -339,6 +360,7 @@ int penglai_enclave_run(struct file *filep, unsigned long args)
 	enclave = get_enclave_by_id(eid);
 	if(!enclave)
 	{
+		kfree(staged_untrusted);
 		printk("KERNEL MODULE: enclave is not exist \n");
 		retval = -EINVAL;
 		goto out;
@@ -348,20 +370,17 @@ int penglai_enclave_run(struct file *filep, unsigned long args)
 
 	enclave->is_running = 1; //set the flag
 
-	
-
 	/* Use untrusted mem as in_out_buf*/
-	if((void*)untrusted_mem_ptr != NULL && untrusted_mem_size > 0){
+	if(staged_untrusted != NULL){
 		if(untrusted_mem_size > enclave->untrusted_mem->size){
+			kfree(staged_untrusted);
 			printk("KERNEL MODULE: untrusted memory is not big enough \n");
-			return -EINVAL;
+			retval = -EINVAL;
+			goto out;
 		}
 		memset((void*)enclave->untrusted_mem->addr, 0, enclave->untrusted_mem->size);
-		if (copy_from_user((void *)enclave->untrusted_mem->addr, (void *)untrusted_mem_ptr, untrusted_mem_size))
-		{
-			printk("KERNEL MODULE: copy_from_user failed \n");
-			return -EFAULT;
-		}
+		memcpy((void *)enclave->untrusted_mem->addr, staged_untrusted, untrusted_mem_size);
+		kfree(staged_untrusted);
 	}
 
 	dprint("[Penglai Driver@%s] goto infinite run loop\n", __func__);

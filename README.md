@@ -20,6 +20,8 @@ Inside the container:
 
 ```sh
 make run-qemu
+# or run on the shared gem5 baseline board:
+make run-gem5
 ```
 
 `make run-qemu` builds any missing artifacts (Buildroot toolchain, Linux 6.1.32, OpenSBI 1.1, driver, SDK `prime` example, `rootfs.ext2`, and QEMU) under `build/` and launches QEMU. Override guest resources with `make run-qemu MEMORY=4G CPUS=4`, or build without booting via `make build`.

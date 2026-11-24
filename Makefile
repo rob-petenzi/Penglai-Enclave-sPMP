@@ -22,9 +22,12 @@ EAPP_CFLAGS = -nostdinc -march=rv64imac -mabi=lp64 \
 	-I$(SDK_WORK)/musl/obj/include -I$(SDK_WORK)/musl/include \
 	-I$(SDK_WORK)/lib/app/include -Wall -g
 JOBS ?= $(shell nproc)
+GEM5_BINARY ?= $(CURDIR)/../gem5/build/SPMP/gem5.opt
+GEM5_CONFIG := $(CURDIR)/scripts/gem5-fs.py
+M5TERM := $(CURDIR)/../gem5/util/term/m5term
 export FORCE_UNSAFE_CONFIGURE=1
 
-.PHONY: all build config sdk qemu-build run-qemu
+.PHONY: all build config sdk qemu-build run-qemu run-gem5
 
 all: build
 
@@ -92,3 +95,20 @@ run-qemu: build
 		-drive file="$(OUT_DIR)/images/rootfs.ext2",format=raw,id=hd0 -device virtio-blk-device,drive=hd0 \
 		-netdev user,id=net0 -device virtio-net-device,netdev=net0 \
 		-append "root=/dev/vda rw console=ttyS0"
+
+run-gem5: $(OUT_DIR)/images/rootfs.ext2
+	rm -rf m5out/
+	$(MAKE) -C "$(CURDIR)/../gem5/util/term"
+	@$(GEM5_BINARY) --listener-mode=on $(GEM5_CONFIG) \
+		--buildroot-dir "$(OUT_DIR)" & \
+	sim_pid=$$!; \
+	trap 'kill "$$sim_pid" 2>/dev/null || true; wait "$$sim_pid" 2>/dev/null || true' EXIT; \
+	until grep -Fq 'Welcome to Buildroot' m5out/board.platform.terminal 2>/dev/null; do \
+		if ! kill -0 "$$sim_pid" 2>/dev/null; then \
+			echo "gem5 exited before Buildroot started"; \
+			wait "$$sim_pid"; \
+			exit 1; \
+		fi; \
+		sleep 0.2; \
+	done; \
+	"$(M5TERM)" localhost 3456

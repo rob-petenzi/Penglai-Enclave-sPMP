@@ -1,6 +1,7 @@
 linux-*.tar.xz
 work/
 build/
+m5out/
 /toolchain
 vivado*.jou
 vivado*.log
